@@ -167,7 +167,9 @@ let target = null, catchShow = null, paused = false, overT = 0, gameT = 0, lastT
 let rodLift = 0;
 const START_TIME = 60;
 const mouse = { x: 0, y: 0, hist: [] };
-const hook = { x: pond.cx, y: pond.cy, px: 0, py: 0, speed: 0, still: 0, inWater: false, lock: false, lx: 0, ly: 0, fish: null, dip: 0, dipTarget: 0, drift: 0 };
+// mode: 'aim' (float hangs from the rod and follows the mouse) → 'flying' (cast in the air) → 'set' (in the water, fixed in place)
+const hook = { mode: 'aim', castT: 0, x: pond.cx, y: pond.cy, still: 0, inWater: false, lock: false, lx: 0, ly: 0, fish: null, dip: 0, dipTarget: 0 };
+const CAST_TIME = 0.45;
 let lastYank = 0;
 
 /* ================= scenery ================= */
@@ -476,7 +478,14 @@ function steer(f, tx, ty, spd, turn, dt) {
   f.x += Math.cos(f.a) * f.v * dt; f.y += Math.sin(f.a) * f.v * dt;
 }
 function toWander(f) { f.state = 'wander'; f.timer = 0; }
-function lockHook() { hook.lock = true; hook.lx = hook.x; hook.ly = hook.y; hook.drift = 0; }
+function lockHook() { hook.lock = true; hook.lx = hook.x; hook.ly = hook.y; }
+function reelIn() { hook.mode = 'aim'; hook.inWater = false; hook.fish = null; unlockHook(); }
+function cast() {
+  const m = unproj(mouse.x, mouse.y);
+  if (!inPond(m.x, m.y, 14)) { popup('Aim at the water!', m.x, m.y, '#fff', 24, 1); return; }
+  hook.mode = 'flying'; hook.castT = 0; hook.x = m.x; hook.y = m.y; hook.inWater = false;
+  rodLift = 0.7; SFX.whoosh();
+}
 function unlockHook() { hook.lock = false; hook.dipTarget = 0; hook.still = 0; }
 function escape(f, msg, sound = 'miss') {
   f.state = 'flee'; f.timer = 1.1; f.cool = 5;
@@ -579,7 +588,7 @@ function chooseTarget() {
 
 function landFish(f) {
   const i = fishes.indexOf(f); if (i >= 0) fishes.splice(i, 1);
-  hook.fish = null; unlockHook();
+  reelIn();
   splash(f.x, f.y, 26, 1.2); SFX.whoosh(); SFX.catch();
   const wanted = !!(target && f.type.id === target.id);
   if (f.type.junk) { time = Math.max(0, time - 5); SFX.boot(); }
@@ -594,15 +603,20 @@ function landFish(f) {
   showHint = false;
 }
 
-function yank() {
+// src: 'click' | 'key' | 'flick'
+function yank(src) {
   if (state !== 'play' || paused || catchShow) return;
+  if (hook.mode === 'aim') { if (src !== 'flick') cast(); return; }
+  if (hook.mode === 'flying') return;
+  // float is in the water: any strike pulls it out
   rodLift = 1;
   const f = hook.fish;
   if (f && f.state === 'bite') { landFish(f); return; }
   SFX.whoosh();
-  if (f && f.state === 'nibble') { escape(f, 'Too early!'); return; }
-  if (f && f.state === 'approach') { escape(f, 'Spooked it!', 'spook'); }
-  if (hook.inWater) { addRipple(hook.x, hook.y, 30, 0.6); hook.still = 0; }
+  if (f && f.state === 'nibble') escape(f, 'Too early!');
+  else if (f && f.state === 'approach') escape(f, 'Spooked it!', 'spook');
+  splash(hook.x, hook.y, 8, 0.5);
+  reelIn();
 }
 
 /* ================= game flow ================= */
@@ -610,15 +624,15 @@ function populate(n) { fishes = []; for (let i = 0; i < n; i++) { const f = make
 function startGame() {
   state = 'play'; time = START_TIME; score = 0; catches = []; newBest = false; paused = false;
   ripples = []; particles = []; popups = []; spawnQ = []; catchShow = null; lastTickSec = 99; startT = gameT; rodLift = 0;
-  hook.fish = null; unlockHook();
-  const w = unproj(mouse.x, mouse.y); hook.x = w.x; hook.y = w.y; hook.inWater = false;
+  reelIn();
+  const w = unproj(mouse.x, mouse.y); hook.x = w.x; hook.y = w.y;
   populate(10); chooseTarget(); showHint = true;
   cv.style.cursor = 'none';
 }
 function endGame() {
   state = 'over'; overT = 0; time = 0;
-  if (hook.fish) { const f = hook.fish; hook.fish = null; toWander(f); }
-  unlockHook();
+  if (hook.fish) toWander(hook.fish);
+  reelIn();
   if (score > best) { best = score; newBest = true; saveBest(best); }
   SFX.end();
   cv.style.cursor = 'default';
@@ -632,7 +646,7 @@ function checkYank(now) {
   const a = h[0], b = h[h.length - 1], dt = (b.t - a.t) / 1000;
   if (dt < 0.02) return;
   const vy = (b.y - a.y) / dt;
-  if (vy < -H * 1.3 && now - lastYank > 450) { lastYank = now; h.length = 0; yank(); }
+  if (vy < -H * 1.3 && now - lastYank > 450) { lastYank = now; h.length = 0; yank('flick'); }
 }
 cv.addEventListener('pointermove', e => {
   mouse.x = e.clientX; mouse.y = e.clientY;
@@ -648,10 +662,10 @@ cv.addEventListener('pointerdown', e => {
   if (state === 'over') { if (overT > 1.0) startGame(); return; }
   if (paused) { paused = false; cv.style.cursor = 'none'; return; }
   if (dist(e.clientX, e.clientY, muteBtn.x, muteBtn.y) < muteBtn.r) { muted = !muted; return; }
-  yank();
+  yank('click');
 });
 window.addEventListener('keydown', e => {
-  if (e.code === 'Space') { e.preventDefault(); audio(); if (state === 'play' && !paused) yank(); else if (state === 'title' || (state === 'over' && overT > 1)) startGame(); }
+  if (e.code === 'Space') { e.preventDefault(); audio(); if (state === 'play' && !paused) yank('key'); else if (state === 'title' || (state === 'over' && overT > 1)) startGame(); }
   else if (e.code === 'KeyM') muted = !muted;
   else if ((e.code === 'KeyP' || e.code === 'Escape') && state === 'play') { paused = !paused; cv.style.cursor = paused ? 'default' : 'none'; }
 });
@@ -668,28 +682,27 @@ function update(dt) {
   else rodLift = Math.max(0, rodLift - dt * 2.4);
 
   if (state === 'play') {
-    hook.px = hook.x; hook.py = hook.y;
-    const m = unproj(mouse.x, mouse.y);
-    if (!hook.lock) {
-      const k = 1 - Math.exp(-dt * 18);
+    if (hook.mode === 'aim') {
+      // float dangles from the rod and follows the mouse until you cast
+      const m = unproj(mouse.x, mouse.y), k = 1 - Math.exp(-dt * 18);
       hook.x = lerp(hook.x, m.x, k); hook.y = lerp(hook.y, m.y, k);
+      hook.inWater = false; hook.still = 0;
+    } else if (hook.mode === 'flying') {
+      hook.castT += dt;
+      if (hook.castT >= CAST_TIME) {
+        hook.mode = 'set'; hook.inWater = true; hook.still = 0;
+        addRipple(hook.x, hook.y, 40, 0.8); SFX.plop();
+      }
     } else {
-      const biting = hook.fish && hook.fish.state === 'bite';
-      hook.x = hook.lx + (biting ? Math.sin(gameT * 32) * 1.5 : 0); hook.y = hook.ly;
-      if (dist(m.x, m.y, hook.lx, hook.ly) > 130) {
-        hook.drift += dt;
-        if (hook.drift > 0.3 && hook.fish) escape(hook.fish, hook.fish.state === 'nibble' ? 'Too jumpy!' : 'It got away…');
-      } else hook.drift = 0;
+      // cast: the float stays exactly where it landed
+      hook.still += dt;
+      if (hook.lock) {
+        const biting = hook.fish && hook.fish.state === 'bite';
+        hook.x = hook.lx + (biting ? Math.sin(gameT * 32) * 1.5 : 0); hook.y = hook.ly;
+      }
     }
-    const sp = dist(hook.x, hook.y, hook.px, hook.py) / Math.max(dt, 1e-3);
-    hook.speed = lerp(hook.speed, sp, 0.3);
-    const was = hook.inWater;
-    hook.inWater = inPond(hook.x, hook.y, 10);
-    if (hook.inWater && !was) { addRipple(hook.x, hook.y, 36, 0.7); SFX.plop(); hook.still = 0; }
-    if (!hook.inWater && hook.fish && !hook.lock) { const f = hook.fish; hook.fish = null; toWander(f); }
-    if (hook.speed < 55) hook.still += dt; else hook.still = 0;
+    if (!hook.inWater && hook.fish) { const f = hook.fish; hook.fish = null; toWander(f); }
     hook.dip = lerp(hook.dip, hook.dipTarget, 1 - Math.exp(-dt * 9));
-    if (hook.fish && hook.fish.state === 'approach' && hook.speed > 320) escape(hook.fish, 'Spooked it!', 'spook');
 
     if (!catchShow && hook.inWater && !hook.lock && !hook.fish && hook.still > 0.35) {
       const R = 230 + Math.min(hook.still, 6) * 35;
@@ -825,6 +838,24 @@ function drawLineAndBobber() {
   const tip = rodTip();
   const p = proj(hook.x, hook.y);
   const r = 13 * p.s;
+  if (hook.mode === 'flying') {
+    // float sails from the rod tip out to where you aimed
+    const k = clamp(hook.castT / CAST_TIME, 0, 1), e = 1 - Math.pow(1 - k, 2);
+    const fx = lerp(tip.x, p.x, e), fy = lerp(tip.y, p.y, e) - Math.sin(Math.PI * k) * H * 0.18;
+    const fr = lerp(16 * SU, r, e);
+    ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 1.4 * SU;
+    ctx.beginPath(); ctx.moveTo(tip.x, tip.y); ctx.lineTo(fx, fy - fr * 1.6); ctx.stroke();
+    ctx.fillStyle = `rgba(0,0,0,${0.25 * e})`; ctx.beginPath(); ctx.ellipse(p.x, p.y, r, r * 0.4, 0, 0, TAU); ctx.fill();
+    drawFloat(fx, fy, fr, 0);
+    return;
+  }
+  if (hook.mode === 'aim' && inPond(hook.x, hook.y, 14)) {
+    // landing marker on the water
+    ctx.save(); ctx.setLineDash([6 * SU, 5 * SU]); ctx.lineDashOffset = -gameT * 20 * SU;
+    ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = 2 * SU;
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, 22 * p.s, 22 * p.s * 0.45, 0, 0, TAU); ctx.stroke();
+    ctx.restore();
+  }
   const bx = p.x, by = hook.inWater ? p.y : p.y - 26 * p.s;
   const tight = (hook.fish && hook.fish.state === 'bite') || rodLift > 0.3;
   const sag = tight ? 0 : (hook.lock ? 10 : 30) * SU;
@@ -976,7 +1007,7 @@ function drawHUD() {
     const a = clamp((gameT - startT) < 12 ? 1 : 1 - ((gameT - startT) - 12) / 2, 0, 1);
     if (a > 0) {
       ctx.globalAlpha = a;
-      const msg = 'Hold the float still · When it plunges, flick the mouse UP (or click)';
+      const msg = hook.mode === 'aim' ? 'Aim with the mouse, then click to cast' : 'Wait… when the float plunges, flick UP or click · Strike early and you reel in';
       ctx.font = `700 ${17 * s}px ${FONT}`;
       const w = ctx.measureText(msg).width + 40 * s;
       panel(W / 2 - w / 2, m + 76 * s, w, 42 * s, 21 * s, 'rgba(10,40,55,.78)', null, false);
@@ -1004,8 +1035,8 @@ function drawTitle() {
   txt('Lilypad Lake', W / 2, y + 70 * s, 62 * s, '#173f4f', 'center', 800);
   txt('a pond fishing game', W / 2, y + 116 * s, 22 * s, '#4a7d8c', 'center', 700);
   const lines = [
-    ['1', 'Move the mouse to drop your float in the pond.'],
-    ['2', 'Hold still. A fish creeps up and nibbles.'],
+    ['1', 'Aim with the mouse, then click to cast.'],
+    ['2', 'Your float stays put. Wait for a nibble…'],
     ['3', 'When the float plunges, flick the mouse UP or click!'],
     ['★', 'Catch the WANTED fish for +10 seconds.'],
   ];
