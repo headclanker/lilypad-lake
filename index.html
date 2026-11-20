@@ -1,0 +1,1109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lilypad Lake</title>
+<meta name="description" content="A relaxing pond fishing game for the desktop browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #5c9c41; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+'use strict';
+
+/* ================= setup ================= */
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const FONT = '"Baloo 2", "Trebuchet MS", system-ui, sans-serif';
+let W = 0, H = 0, DPR = 1, SU = 1, HS = 1;
+
+// The game runs on a flat, top-down "world" map of the pond.
+// Each frame that map is redrawn in perspective so you look out over it from the shore.
+const WW = 1800, WH = 900, WS = 1.2, STRIP = 2;
+const pond = { cx: 900, cy: 470, rx: 560, ry: 380 };
+const world = document.createElement('canvas');
+world.width = WW * WS; world.height = WH * WS;
+const wctx = world.getContext('2d');
+let worldStatic = null, skyCanvas = null, fgCanvas = null, lilies = [], reedSpots = [];
+const cam = { D: 585, yc: WH + 585, A: 1, B: 1, hy: 0, farY: 0 };
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const randi = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+const TAU = Math.PI * 2;
+function angDiff(a, b) { let d = b - a; while (d > Math.PI) d -= TAU; while (d < -Math.PI) d += TAU; return d; }
+function easeOutBack(p) { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2); }
+function mulberry(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const f = v => clamp(Math.round(v + amt * 2.55), 0, 255);
+  return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
+}
+function rr(c, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+}
+
+/* ================= camera ================= */
+function proj(x, y) {
+  const z = Math.max(60, cam.yc - y);
+  return { x: W / 2 + (x - WW / 2) * cam.B / z, y: cam.hy + cam.A / z, s: cam.B / z };
+}
+function unproj(sx, sy) {
+  sy = Math.max(sy, cam.farY + 1);
+  const z = cam.A / (sy - cam.hy);
+  return { x: WW / 2 + (sx - W / 2) * z / cam.B, y: cam.yc - z };
+}
+
+/* ================= pond geometry ================= */
+function shapeR(th) { return 1 + 0.06 * Math.sin(3 * th + 0.7) + 0.035 * Math.sin(5 * th + 2.1) + 0.02 * Math.sin(7 * th); }
+function pondNorm(x, y) {
+  const nx = (x - pond.cx) / pond.rx, ny = (y - pond.cy) / pond.ry;
+  const th = Math.atan2(ny, nx);
+  return { d: Math.hypot(nx, ny) / shapeR(th), th };
+}
+function inPond(x, y, m = 0) { return pondNorm(x, y).d < 1 - m / Math.min(pond.rx, pond.ry); }
+function clampPond(p, m) {
+  const { d } = pondNorm(p.x, p.y);
+  const lim = 1 - m / Math.min(pond.rx, pond.ry);
+  if (d > lim) { const s = lim / d; p.x = pond.cx + (p.x - pond.cx) * s; p.y = pond.cy + (p.y - pond.cy) * s; return true; }
+  return false;
+}
+function randomPondPoint(m) {
+  for (let i = 0; i < 60; i++) {
+    const x = rand(pond.cx - pond.rx, pond.cx + pond.rx), y = rand(pond.cy - pond.ry, pond.cy + pond.ry);
+    if (inPond(x, y, m)) return { x, y };
+  }
+  return { x: pond.cx, y: pond.cy };
+}
+function rimPoint(th, scale) {
+  const r = shapeR(th) * scale;
+  return { x: pond.cx + Math.cos(th) * pond.rx * r, y: pond.cy + Math.sin(th) * pond.ry * r };
+}
+function pondPath(c, scale = 1) {
+  c.beginPath();
+  for (let i = 0; i <= 160; i++) {
+    const p = rimPoint(i / 160 * TAU, scale);
+    i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y);
+  }
+  c.closePath();
+}
+
+/* ================= fish types ================= */
+// window = seconds you have to strike after the bobber plunges
+const TYPES = [
+  { id: 'minnow', name: 'Minnow',     pts: 10,  size: 44,  speed: 95,  color: '#9fb4bf', side: '#d5e2e8', w: 0.20, weight: 5,   window: 0.85, nib: [1, 2], cm: [5, 9] },
+  { id: 'sunny',  name: 'Sunfish',    pts: 20,  size: 58,  speed: 72,  color: '#c8912f', side: '#efcf7e', w: 0.34, weight: 4,   window: 0.8,  nib: [1, 3], cm: [10, 18] },
+  { id: 'perch',  name: 'Perch',      pts: 30,  size: 70,  speed: 78,  color: '#7f9d3e', side: '#d8d996', w: 0.25, weight: 4,   window: 0.75, nib: [2, 3], cm: [15, 28], stripes: true },
+  { id: 'bass',   name: 'Bass',       pts: 50,  size: 92,  speed: 72,  color: '#4f6f3e', side: '#a9bb83', w: 0.27, weight: 3,   window: 0.68, nib: [2, 3], cm: [25, 45] },
+  { id: 'carp',   name: 'Carp',       pts: 70,  size: 112, speed: 52,  color: '#7d5d33', side: '#c9ad78', w: 0.30, weight: 2,   window: 0.62, nib: [2, 4], cm: [40, 70], scales: true },
+  { id: 'pike',   name: 'Pike',       pts: 100, size: 140, speed: 100, color: '#435e47', side: '#a6b98a', w: 0.16, weight: 1.2, window: 0.5,  nib: [2, 4], cm: [60, 100], spots: true },
+  { id: 'koi',    name: 'Golden Koi', pts: 150, size: 84,  speed: 85,  color: '#f08a24', side: '#ffc36b', w: 0.25, weight: 0.6, window: 0.42, nib: [3, 5], cm: [30, 50], koi: true },
+  { id: 'boot',   name: 'Old Boot',   pts: 0,   size: 64,  speed: 12,  junk: true, weight: 0.8, window: 1.4, nib: [0, 0], cm: [0, 0] },
+];
+const TYPE = Object.fromEntries(TYPES.map(t => [t.id, t]));
+
+/* ================= audio ================= */
+let AC = null, muted = false, noiseBuf = null;
+function audio() {
+  if (!AC) {
+    try {
+      AC = new (window.AudioContext || window.webkitAudioContext)();
+      noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+      const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    } catch (e) { AC = null; }
+  }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function tone(freq, dur, type = 'sine', vol = 0.2, slide = 0, delay = 0) {
+  if (!AC || muted) return;
+  const t0 = AC.currentTime + delay, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t0);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(vol, t0 + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g).connect(AC.destination); o.start(t0); o.stop(t0 + dur + 0.05);
+}
+function noise(dur, vol = 0.2, freq = 1200, delay = 0) {
+  if (!AC || muted) return;
+  const t0 = AC.currentTime + delay, s = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+  s.buffer = noiseBuf; f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = 0.8;
+  g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  s.connect(f).connect(g).connect(AC.destination); s.start(t0); s.stop(t0 + dur + 0.05);
+}
+const SFX = {
+  plop()   { tone(640, 0.14, 'sine', 0.22, -470); noise(0.08, 0.06, 900); },
+  nibble() { tone(1000, 0.045, 'triangle', 0.14, -420); noise(0.04, 0.05, 2500); },
+  plunge() { noise(0.45, 0.4, 520); tone(300, 0.3, 'sine', 0.3, -200); tone(150, 0.35, 'sine', 0.2, -60, 0.03); },
+  whoosh() { noise(0.18, 0.18, 1800); },
+  catch()  { noise(0.35, 0.3, 1600); [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.2, 'triangle', 0.16, 0, 0.35 + i * 0.08)); },
+  miss()   { tone(420, 0.32, 'sawtooth', 0.06, -260); },
+  spook()  { noise(0.12, 0.12, 2200); },
+  tick()   { tone(1250, 0.05, 'square', 0.045); },
+  bonus()  { [784, 988, 1175, 1568].forEach((f, i) => tone(f, 0.16, 'square', 0.06, 0, 0.75 + i * 0.07)); },
+  boot()   { tone(170, 0.45, 'sawtooth', 0.1, -70, 0.4); },
+  end()    { [784, 659, 523, 659, 1047].forEach((f, i) => tone(f, 0.24, 'triangle', 0.16, 0, i * 0.14)); },
+};
+
+/* ================= storage ================= */
+function loadBest() { try { return parseInt(localStorage.getItem('lilypad-best') || '0', 10) || 0; } catch (e) { return 0; } }
+function saveBest(v) { try { localStorage.setItem('lilypad-best', String(v)); } catch (e) {} }
+
+/* ================= game state ================= */
+let state = 'title', time = 0, score = 0, best = loadBest(), newBest = false;
+let catches = [], fishes = [], ripples = [], particles = [], popups = [], spawnQ = [];
+let target = null, catchShow = null, paused = false, overT = 0, gameT = 0, lastTickSec = 99, showHint = true, startT = 0;
+let rodLift = 0;
+const START_TIME = 60;
+const mouse = { x: 0, y: 0, hist: [] };
+const hook = { x: pond.cx, y: pond.cy, px: 0, py: 0, speed: 0, still: 0, inWater: false, lock: false, lx: 0, ly: 0, fish: null, dip: 0, dipTarget: 0, drift: 0 };
+let lastYank = 0;
+
+/* ================= scenery ================= */
+function drawRock(g, x, y, r, R) {
+  g.fillStyle = 'rgba(0,0,0,.22)'; g.beginPath(); g.ellipse(x + r * 0.15, y + r * 0.25, r * 1.05, r * 0.7, 0, 0, TAU); g.fill();
+  const gr = g.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.1, x, y, r * 1.1);
+  const base = 120 + R() * 30;
+  gr.addColorStop(0, `rgb(${base + 60},${base + 58},${base + 50})`); gr.addColorStop(1, `rgb(${base - 40},${base - 38},${base - 34})`);
+  g.fillStyle = gr; g.beginPath(); g.ellipse(x, y, r, r * 0.72, R() * 0.6 - 0.3, 0, TAU); g.fill();
+  g.fillStyle = 'rgba(110,140,60,.45)'; g.beginPath(); g.ellipse(x - r * 0.25, y - r * 0.3, r * 0.4, r * 0.18, -0.3, 0, TAU); g.fill();
+}
+
+function buildWorldStatic() {
+  const c = document.createElement('canvas'); c.width = WW * WS; c.height = WH * WS;
+  const g = c.getContext('2d'); g.setTransform(WS, 0, 0, WS, 0, 0);
+  const R = mulberry(1234);
+  g.fillStyle = '#5c9c41'; g.fillRect(0, 0, WW, WH);
+  for (let i = 0; i < 90; i++) {
+    g.fillStyle = R() < 0.5 ? `rgba(40,90,30,${0.05 + R() * 0.07})` : `rgba(170,215,100,${0.05 + R() * 0.06})`;
+    g.beginPath(); g.ellipse(R() * WW, R() * WH, 40 + R() * 140, 20 + R() * 70, R() * 3, 0, TAU); g.fill();
+  }
+  g.lineCap = 'round';
+  for (let i = 0; i < 9000; i++) {
+    const x = R() * WW, y = R() * WH;
+    if (inPond(x, y, -30)) continue;
+    const h = 6 + R() * 10;
+    g.strokeStyle = `hsl(${92 + R() * 30},${42 + R() * 22}%,${27 + R() * 24}%)`;
+    g.lineWidth = 1.2 + R() * 1.4;
+    g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + (R() - 0.5) * 4, y - h * 0.6, x + (R() - 0.5) * 8, y - h); g.stroke();
+  }
+  for (let i = 0; i < 110; i++) {
+    const x = R() * WW, y = R() * WH;
+    if (inPond(x, y, -45)) continue;
+    const col = ['#ffffff', '#ffe36e', '#f7a8c8', '#c9b6ff'][Math.floor(R() * 4)], r = 3;
+    g.fillStyle = col;
+    for (let k = 0; k < 5; k++) { const a = k / 5 * TAU; g.beginPath(); g.arc(x + Math.cos(a) * r, y + Math.sin(a) * r, r, 0, TAU); g.fill(); }
+    g.fillStyle = '#e9a23b'; g.beginPath(); g.arc(x, y, r * 0.8, 0, TAU); g.fill();
+  }
+  pondPath(g, 1.075); g.fillStyle = 'rgba(50,80,25,.35)'; g.fill();
+  pondPath(g, 1.05); g.fillStyle = '#d2bb84'; g.fill();
+  for (let i = 0; i < 600; i++) {
+    const p = rimPoint(R() * TAU, 1.02 + R() * 0.03);
+    g.fillStyle = `rgba(${R() < 0.5 ? '120,100,60' : '240,225,180'},.35)`;
+    g.beginPath(); g.arc(p.x, p.y, 1 + R() * 1.8, 0, TAU); g.fill();
+  }
+  pondPath(g, 1.02); g.fillStyle = '#9d8452'; g.fill();
+  for (let i = 0; i < 22; i++) {
+    const p = rimPoint(R() * TAU, 1.0 + R() * 0.05);
+    drawRock(g, p.x, p.y, 12 + R() * 20, R);
+  }
+  worldStatic = c;
+
+  lilies = [];
+  for (let tries = 0; lilies.length < 9 && tries < 400; tries++) {
+    const th = R() * TAU, d = 0.5 + R() * 0.38;
+    const p = rimPoint(th, d);
+    const r = 26 + R() * 26;
+    if (lilies.some(l => dist(l.x, l.y, p.x, p.y) < l.r + r + 8)) continue;
+    lilies.push({ x: p.x, y: p.y, r, rot: R() * TAU, flower: R() < 0.4, ph: R() * 10, hue: R() < 0.5 ? 330 : 50 });
+  }
+  reedSpots = [];
+  for (let i = 0; i < 12; i++) {
+    const th = R() * TAU;
+    const p = rimPoint(th, 1.03);
+    // keep the near shore (the player's side) mostly open
+    if (Math.sin(th) > 0.55) continue;
+    reedSpots.push({ x: p.x, y: p.y, seed: Math.floor(R() * 1e6) });
+  }
+  reedSpots.sort((a, b) => a.y - b.y);
+}
+
+function buildSky() {
+  const c = document.createElement('canvas'); c.width = cv.width; c.height = cv.height;
+  const g = c.getContext('2d'); g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const R = mulberry(99);
+  const fy = cam.farY;
+  g.fillStyle = '#5c9c41'; g.fillRect(0, 0, W, H);
+  const sky = g.createLinearGradient(0, 0, 0, fy);
+  sky.addColorStop(0, '#7cc3ea'); sky.addColorStop(1, '#d8f0f8');
+  g.fillStyle = sky; g.fillRect(0, 0, W, fy + 2);
+  // clouds
+  for (let i = 0; i < 6; i++) {
+    const x = R() * W, y = R() * fy * 0.55 + 10 * SU, s = (0.6 + R() * 0.8) * SU;
+    g.fillStyle = 'rgba(255,255,255,.85)';
+    for (let k = 0; k < 5; k++) { g.beginPath(); g.ellipse(x + (k - 2) * 26 * s, y + Math.abs(k - 2) * 6 * s, 30 * s, 18 * s, 0, 0, TAU); g.fill(); }
+  }
+  // distant hills
+  g.fillStyle = '#9cc49a';
+  g.beginPath(); g.moveTo(0, fy);
+  for (let x = 0; x <= W; x += 20) g.lineTo(x, fy - 40 * SU - Math.sin(x * 0.004 + 1) * 30 * SU - Math.sin(x * 0.011) * 10 * SU);
+  g.lineTo(W, fy); g.closePath(); g.fill();
+  g.fillStyle = '#7fb07e';
+  g.beginPath(); g.moveTo(0, fy);
+  for (let x = 0; x <= W; x += 20) g.lineTo(x, fy - 18 * SU - Math.sin(x * 0.006 + 3) * 16 * SU);
+  g.lineTo(W, fy); g.closePath(); g.fill();
+  // tree line
+  for (let i = 0; i < W / (16 * SU); i++) {
+    const x = i * 16 * SU + R() * 10 * SU, r = (12 + R() * 14) * SU;
+    g.fillStyle = R() < 0.5 ? '#3e7a45' : '#4a8a4c';
+    g.beginPath(); g.ellipse(x, fy - r * 0.6, r * 0.9, r, 0, 0, TAU); g.fill();
+  }
+  skyCanvas = c;
+
+  // near-shore foreground framing: reeds and grass in the bottom corners
+  const f = document.createElement('canvas'); f.width = cv.width; f.height = cv.height;
+  const h = f.getContext('2d'); h.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const R2 = mulberry(4321);
+  for (const side of [-1, 1]) {
+    const bx = side < 0 ? 0 : W;
+    for (let i = 0; i < 26; i++) {
+      const x = bx - side * R2() * W * 0.16, y = H + 10 * SU;
+      const len = (90 + R2() * 170) * SU, lean = side * (-0.1 - R2() * 0.35);
+      h.strokeStyle = `hsl(${85 + R2() * 25},${38 + R2() * 18}%,${22 + R2() * 16}%)`;
+      h.lineWidth = (4 + R2() * 5) * SU; h.lineCap = 'round';
+      h.beginPath(); h.moveTo(x, y);
+      h.quadraticCurveTo(x + lean * len * 0.3, y - len * 0.6, x + lean * len, y - len); h.stroke();
+      if (R2() < 0.3) {
+        h.save(); h.translate(x + lean * len * 0.95, y - len * 0.95); h.rotate(lean * 0.9);
+        h.fillStyle = '#6b4424'; h.beginPath(); rr(h, -6 * SU, -20 * SU, 12 * SU, 34 * SU, 6 * SU); h.fill(); h.restore();
+      }
+    }
+  }
+  fgCanvas = f;
+}
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  SU = Math.min(W, H) / 800;
+  HS = clamp(Math.min(W / 1100, H / 760), 0.62, 1.35);
+  const farFrac = 0.30, nearFrac = 1.0;
+  cam.A = (nearFrac - farFrac) * H / (1 / cam.D - 1 / cam.yc);
+  cam.hy = farFrac * H - cam.A / cam.yc;
+  cam.B = Math.min(1.08 * W, 1.7 * H) * cam.D / (pond.rx * 2.1);
+  cam.farY = cam.hy + cam.A / cam.yc;
+  buildSky();
+}
+
+/* ================= drawing primitives ================= */
+function fishPath(c, L, bw) {
+  c.beginPath(); c.moveTo(L * 0.5, 0);
+  c.bezierCurveTo(L * 0.46, -bw * 0.95, -L * 0.05, -bw * 1.1, -L * 0.4, -bw * 0.28);
+  c.lineTo(-L * 0.4, bw * 0.28);
+  c.bezierCurveTo(-L * 0.05, bw * 1.1, L * 0.46, bw * 0.95, L * 0.5, 0);
+  c.closePath();
+}
+function tailPath(c, L, bw, wag) {
+  c.save(); c.translate(-L * 0.37, 0); c.rotate(wag);
+  c.beginPath(); c.moveTo(0, -bw * 0.22);
+  c.quadraticCurveTo(-L * 0.12, -bw * 0.3, -L * 0.24, -bw * 1.05);
+  c.quadraticCurveTo(-L * 0.15, 0, -L * 0.24, bw * 1.05);
+  c.quadraticCurveTo(-L * 0.12, bw * 0.3, 0, bw * 0.22);
+  c.closePath(); c.restore();
+}
+function drawBoot(c, x, y, a, L, mode) {
+  c.save(); c.translate(x, y); c.rotate(a);
+  const s = L / 50, shadow = mode === 'shadow';
+  c.fillStyle = shadow ? 'rgba(0,20,30,.28)' : '#6b4a2b';
+  c.beginPath(); c.ellipse(-12 * s, 0, 13 * s, 12 * s, 0, 0, TAU); c.fill();
+  c.beginPath(); rr(c, -14 * s, -10 * s, 37 * s, 20 * s, 10 * s); c.fill();
+  if (!shadow) {
+    c.strokeStyle = '#4a311b'; c.lineWidth = 2 * s;
+    c.beginPath(); rr(c, -14 * s, -10 * s, 37 * s, 20 * s, 10 * s); c.stroke();
+    c.fillStyle = '#2e1e10'; c.beginPath(); c.ellipse(-12 * s, 0, 8 * s, 7 * s, 0, 0, TAU); c.fill();
+    c.strokeStyle = '#d9c9a0'; c.lineWidth = 1.4 * s;
+    for (let i = 0; i < 3; i++) { const lx = -1 * s + i * 5 * s; c.beginPath(); c.moveTo(lx, -5 * s); c.lineTo(lx + 4 * s, 5 * s); c.moveTo(lx + 4 * s, -5 * s); c.lineTo(lx, 5 * s); c.stroke(); }
+    c.fillStyle = 'rgba(120,150,70,.55)'; c.beginPath(); c.ellipse(14 * s, -4 * s, 5 * s, 3 * s, 0.4, 0, TAU); c.fill();
+  }
+  c.restore();
+}
+function drawFish(c, type, x, y, a, L, t, phase, mode = 'water', wagAmp = 1) {
+  if (type.junk) return drawBoot(c, x, y, a, L, mode);
+  const bw = L * type.w, wag = Math.sin(t * 9 + phase) * 0.32 * wagAmp;
+  c.save(); c.translate(x, y); c.rotate(a);
+  if (mode === 'shadow') {
+    c.fillStyle = 'rgba(0,25,35,0.3)';
+    tailPath(c, L, bw, wag); c.fill(); fishPath(c, L, bw); c.fill();
+    c.restore(); return;
+  }
+  c.fillStyle = shade(type.color, -12);
+  for (const s of [-1, 1]) {
+    c.save(); c.translate(L * 0.17, s * bw * 0.72); c.rotate(s * (0.7 + Math.sin(t * 6 + phase) * 0.3));
+    c.beginPath(); c.ellipse(-L * 0.06, s * bw * 0.22, L * 0.085, bw * 0.32, 0, 0, TAU); c.fill(); c.restore();
+  }
+  c.fillStyle = type.koi ? '#ffd9a8' : shade(type.color, -6);
+  tailPath(c, L, bw, wag); c.fill();
+  const g = c.createLinearGradient(0, -bw, 0, bw);
+  g.addColorStop(0, type.side); g.addColorStop(0.5, shade(type.color, -10)); g.addColorStop(1, type.side);
+  c.fillStyle = g; fishPath(c, L, bw); c.fill();
+  c.save(); fishPath(c, L, bw); c.clip();
+  if (type.stripes) { c.fillStyle = 'rgba(40,50,20,.45)'; for (let k = 0; k < 5; k++) { c.beginPath(); c.ellipse(L * (0.25 - k * 0.12), 0, L * 0.025, bw * 1.2, 0, 0, TAU); c.fill(); } }
+  if (type.spots) { c.fillStyle = 'rgba(230,240,190,.55)'; for (let k = 0; k < 14; k++) { const px = L * (0.3 - (k % 7) * 0.1), py = (k < 7 ? -1 : 1) * bw * (0.35 + (k % 3) * 0.15); c.beginPath(); c.arc(px, py, bw * 0.12, 0, TAU); c.fill(); } }
+  if (type.scales) { c.strokeStyle = 'rgba(60,40,15,.25)'; c.lineWidth = Math.max(0.6, L * 0.008); for (let k = 0; k < 6; k++) for (let j = -2; j <= 2; j++) { c.beginPath(); c.arc(L * (0.25 - k * 0.1), j * bw * 0.35, bw * 0.2, -1.2, 1.2); c.stroke(); } }
+  if (type.koi) {
+    c.fillStyle = 'rgba(255,250,240,.95)';
+    c.beginPath(); c.ellipse(L * 0.05, -bw * 0.2, L * 0.14, bw * 0.55, 0.3, 0, TAU); c.fill();
+    c.beginPath(); c.ellipse(-L * 0.25, bw * 0.15, L * 0.09, bw * 0.4, -0.2, 0, TAU); c.fill();
+    const sh = (Math.sin(t * 3 + phase) + 1) / 2;
+    c.fillStyle = `rgba(255,255,200,${0.15 + sh * 0.25})`; c.fillRect(-L, -bw * 0.3, L * 2, bw * 0.25);
+  }
+  c.restore();
+  c.strokeStyle = 'rgba(0,0,0,.18)'; c.lineWidth = Math.max(1, bw * 0.18); c.lineCap = 'round';
+  c.beginPath(); c.moveTo(L * 0.3, 0); c.lineTo(-L * 0.32, 0); c.stroke();
+  for (const s of [-1, 1]) {
+    c.fillStyle = '#111'; c.beginPath(); c.arc(L * 0.36, s * bw * 0.5, Math.max(1.2, bw * 0.15), 0, TAU); c.fill();
+    c.fillStyle = '#fff'; c.beginPath(); c.arc(L * 0.365, s * bw * 0.5 - bw * 0.04, Math.max(0.5, bw * 0.05), 0, TAU); c.fill();
+  }
+  if (mode === 'air') {
+    c.fillStyle = 'rgba(255,255,255,.35)';
+    c.beginPath(); c.ellipse(L * 0.12, -bw * 0.45, L * 0.18, bw * 0.12, -0.05, 0, TAU); c.fill();
+  }
+  c.restore();
+}
+
+function drawLily(g, l, t) {
+  const x = l.x + Math.sin(t * 0.5 + l.ph) * 1.5, y = l.y + Math.cos(t * 0.4 + l.ph) * 1.5, r = l.r, rot = l.rot + Math.sin(t * 0.3 + l.ph) * 0.05;
+  g.fillStyle = 'rgba(0,30,30,.25)';
+  g.beginPath(); g.ellipse(x + 4, y + 5, r, r * 0.95, 0, 0, TAU); g.fill();
+  g.save(); g.translate(x, y); g.rotate(rot);
+  const gr = g.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r);
+  gr.addColorStop(0, '#8fcf5a'); gr.addColorStop(1, '#4b9a3a');
+  g.fillStyle = gr;
+  g.beginPath(); g.moveTo(0, 0); g.arc(0, 0, r, 0.28, TAU - 0.28); g.closePath(); g.fill();
+  g.strokeStyle = 'rgba(210,240,160,.35)'; g.lineWidth = 1.4;
+  for (let k = 1; k < 8; k++) { const a = 0.28 + k * (TAU - 0.56) / 8; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a) * r * 0.9, Math.sin(a) * r * 0.9); g.stroke(); }
+  g.restore();
+}
+// flowers stand up off the pad, so they are drawn upright in screen space
+function drawLilyFlower(l) {
+  if (!l.flower) return;
+  const p = proj(l.x - l.r * 0.15, l.y - l.r * 0.1), fr = l.r * 0.42 * p.s;
+  for (let layer = 0; layer < 2; layer++) {
+    const n = 7, rad = fr * (layer ? 0.62 : 1);
+    ctx.fillStyle = l.hue === 330 ? (layer ? '#ffe1ee' : '#f59fc4') : (layer ? '#fffbe0' : '#ffffff');
+    for (let k = 0; k < n; k++) {
+      const a = Math.PI + (k / (n - 1)) * Math.PI;
+      ctx.beginPath(); ctx.ellipse(p.x + Math.cos(a) * rad * 0.5, p.y + Math.sin(a) * rad * 0.55 - rad * 0.1, rad * 0.22, rad * 0.55, a + Math.PI / 2, 0, TAU); ctx.fill();
+    }
+  }
+  ctx.fillStyle = '#ffc93c'; ctx.beginPath(); ctx.ellipse(p.x, p.y - fr * 0.15, fr * 0.25, fr * 0.15, 0, 0, TAU); ctx.fill();
+}
+
+function drawReedCluster(spot) {
+  const p = proj(spot.x, spot.y), s = p.s;
+  const R = mulberry(spot.seed);
+  const n = 7 + Math.floor(R() * 7);
+  ctx.lineCap = 'round';
+  for (let i = 0; i < n; i++) {
+    const bx = p.x + (R() - 0.5) * 60 * s, by = p.y + (R() - 0.5) * 8 * s;
+    const h = (70 + R() * 80) * s, lean = (R() - 0.5) * 30 * s + Math.sin(gameT * 1.1 + i) * 2 * s;
+    ctx.strokeStyle = `hsl(${85 + R() * 25},${40 + R() * 15}%,${26 + R() * 14}%)`;
+    ctx.lineWidth = (2.5 + R() * 2) * s;
+    ctx.beginPath(); ctx.moveTo(bx, by); ctx.quadraticCurveTo(bx + lean * 0.3, by - h * 0.6, bx + lean, by - h); ctx.stroke();
+    if (R() < 0.45) {
+      ctx.save(); ctx.translate(bx + lean * 0.92, by - h * 0.9); ctx.rotate(Math.atan2(lean, h) * 0.9);
+      ctx.fillStyle = '#6b4424'; ctx.beginPath(); rr(ctx, -4 * s, -13 * s, 8 * s, 22 * s, 4 * s); ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+function panel(x, y, w, h, r, fill, stroke, shadow = true) {
+  if (shadow) { ctx.fillStyle = 'rgba(0,0,0,.18)'; ctx.beginPath(); rr(ctx, x, y + 4 * HS, w, h, r); ctx.fill(); }
+  ctx.fillStyle = fill; ctx.beginPath(); rr(ctx, x, y, w, h, r); ctx.fill();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 3 * HS; ctx.stroke(); }
+}
+function txt(s, x, y, size, color, align = 'center', weight = 800, outline = null) {
+  ctx.font = `${weight} ${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  if (outline) { ctx.lineJoin = 'round'; ctx.strokeStyle = outline; ctx.lineWidth = size * 0.22; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+
+/* ================= effects ================= */
+function addRipple(x, y, max, a = 0.6, speed = 1) { ripples.push({ x, y, r: 2, max, a, life: 0, dur: 0.9 / speed }); }
+function splash(wx, wy, n = 18, power = 1) {
+  const p = proj(wx, wy);
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, TAU), s = rand(60, 220) * p.s * power;
+    particles.push({ x: p.x, y: p.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s * 0.4 - rand(120, 320) * p.s * power, life: 0, dur: rand(0.4, 0.8), r: rand(2, 4.5) * p.s, g: 700 * p.s });
+  }
+  addRipple(wx, wy, 70, 0.8); addRipple(wx, wy, 110, 0.5, 0.7);
+}
+function popup(text, wx, wy, color = '#fff', size = 30, dur = 1.3) { const p = proj(wx, wy); popups.push({ text, x: p.x, y: p.y, t: 0, dur, color, size }); }
+
+/* ================= fish logic ================= */
+const FL = f => f.type.size * f.sc;
+function pickType() {
+  const counts = {};
+  fishes.forEach(f => counts[f.type.id] = (counts[f.type.id] || 0) + 1);
+  const pool = TYPES.filter(t => !((t.id === 'koi' || t.id === 'boot') && counts[t.id] >= 1));
+  let r = Math.random() * pool.reduce((s, t) => s + t.weight, 0);
+  for (const t of pool) { r -= t.weight; if (r <= 0) return t; }
+  return pool[0];
+}
+function makeFish(type) {
+  const cm = type.junk ? 0 : rand(type.cm[0], type.cm[1]);
+  const sc = type.junk ? 1 : 0.85 + 0.3 * (cm - type.cm[0]) / (type.cm[1] - type.cm[0]);
+  const p = randomPondPoint(type.size * sc * 0.6 + 14);
+  return { type, cm: Math.round(cm), sc, x: p.x, y: p.y, a: rand(0, TAU), v: 0, tx: p.x, ty: p.y, state: 'wander', timer: rand(0, 2), cool: 0, phase: rand(0, 10), fade: 0, nib: 0, poke: 0, idle: 0, hes: 0 };
+}
+function steer(f, tx, ty, spd, turn, dt) {
+  const da = angDiff(f.a, Math.atan2(ty - f.y, tx - f.x));
+  f.a += clamp(da, -turn * dt, turn * dt);
+  f.v = lerp(f.v, spd, 1 - Math.exp(-dt * 3));
+  f.x += Math.cos(f.a) * f.v * dt; f.y += Math.sin(f.a) * f.v * dt;
+}
+function toWander(f) { f.state = 'wander'; f.timer = 0; }
+function lockHook() { hook.lock = true; hook.lx = hook.x; hook.ly = hook.y; hook.drift = 0; }
+function unlockHook() { hook.lock = false; hook.dipTarget = 0; hook.still = 0; }
+function escape(f, msg, sound = 'miss') {
+  f.state = 'flee'; f.timer = 1.1; f.cool = 5;
+  f.a = Math.atan2(f.y - hook.y, f.x - hook.x) + rand(-0.5, 0.5);
+  if (hook.fish === f) { hook.fish = null; unlockHook(); }
+  if (msg) popup(msg, hook.x, hook.y, '#fff', 26);
+  if (sound === 'miss') SFX.miss(); else if (sound === 'spook') SFX.spook();
+  addRipple(f.x, f.y, 40, 0.5);
+}
+function startBite(f, windowT) {
+  f.state = 'bite'; f.timer = windowT || f.type.window;
+  hook.dipTarget = 1; hook.dip = 1;
+  SFX.plunge(); splash(hook.lx, hook.ly, 12, 0.7);
+}
+
+function updateFish(f, dt) {
+  const L = FL(f);
+  f.cool -= dt;
+  f.fade = Math.min(1, f.fade + dt * 0.7);
+  switch (f.state) {
+    case 'wander': {
+      f.timer -= dt;
+      if (f.timer <= 0 || dist(f.x, f.y, f.tx, f.ty) < 25) {
+        const p = randomPondPoint(L * 0.6 + 14);
+        f.tx = p.x; f.ty = p.y; f.timer = rand(3, 8);
+        f.idle = Math.random() < 0.35 ? rand(0.8, 2.5) : 0;
+      }
+      let spd = f.type.speed * 0.55;
+      if (f.idle > 0) { f.idle -= dt; spd *= 0.06; }
+      steer(f, f.tx, f.ty, spd, 1.6, dt);
+      if (clampPond(f, L * 0.55 + 8)) f.timer = 0;
+      break;
+    }
+    case 'approach': {
+      if (!hook.inWater || hook.lock || hook.fish !== f) { if (hook.fish === f) hook.fish = null; toWander(f); break; }
+      const hx = f.x + Math.cos(f.a) * L / 2, hy = f.y + Math.sin(f.a) * L / 2;
+      const d = dist(hx, hy, hook.x, hook.y);
+      // cautious approach: the fish creeps in, stops to look, then creeps again
+      if (f.hes > 0) { f.hes -= dt; steer(f, hook.x, hook.y, 0, 2.5, dt); }
+      else {
+        steer(f, hook.x, hook.y, Math.min(f.type.speed * 0.6, d * 2 + 12), 3.2, dt);
+        if (d > 45 && Math.random() < dt * 0.9) f.hes = rand(0.3, 0.9);
+      }
+      clampPond(f, L * 0.4);
+      f.appT = (f.appT || 0) + dt;
+      const cd = dist(f.x, f.y, hook.x, hook.y);
+      if (d < 12 || cd < L * 0.55 || (f.appT > 7 && cd < L * 1.2)) {
+        f.appT = 0;
+        f.state = 'nibble'; f.nib = randi(f.type.nib[0], f.type.nib[1]); f.timer = rand(0.4, 0.9); f.poke = 0;
+        lockHook();
+      }
+      break;
+    }
+    case 'nibble':
+    case 'bite': {
+      const ang = Math.atan2(hook.ly - f.y, hook.lx - f.x);
+      f.a += angDiff(f.a, ang) * Math.min(1, dt * 6);
+      let back;
+      if (f.state === 'nibble') {
+        f.timer -= dt;
+        if (f.poke > 0) {
+          f.poke -= dt;
+          const p = 1 - Math.max(0, f.poke) / 0.18;
+          back = 14 * (1 - Math.sin(Math.PI * p));
+          if (f.poke <= 0 && f.nib <= 0) startBite(f);
+        } else {
+          back = 14 + Math.sin(gameT * 3 + f.phase) * 2;
+          if (f.timer <= 0) {
+            // a quick tap on the bait: small bob of the float
+            f.poke = 0.18; f.nib--;
+            f.timer = f.nib > 0 ? rand(0.35, 0.95) : rand(0.25, 0.7);
+            hook.dip = Math.max(hook.dip, 0.42); SFX.nibble(); addRipple(hook.lx, hook.ly, 24, 0.6, 1.5);
+          }
+        }
+      } else {
+        back = -4;
+        f.timer -= dt;
+        if (f.timer <= 0) { escape(f, f.type.junk ? 'Snag came loose.' : 'It got away…'); break; }
+      }
+      const k = Math.min(1, dt * 14);
+      f.x = lerp(f.x, hook.lx - Math.cos(f.a) * (L / 2 + back), k);
+      f.y = lerp(f.y, hook.ly - Math.sin(f.a) * (L / 2 + back), k);
+      break;
+    }
+    case 'flee': {
+      f.timer -= dt;
+      steer(f, f.x + Math.cos(f.a) * 100, f.y + Math.sin(f.a) * 100, f.type.speed * 2.3, 1, dt);
+      if (clampPond(f, L * 0.55 + 8)) f.a += 1.2 * dt * 3;
+      if (f.timer <= 0) toWander(f);
+      break;
+    }
+  }
+}
+
+function chooseTarget() {
+  const present = [...new Set(fishes.filter(f => !f.type.junk).map(f => f.type.id))];
+  const options = present.filter(id => !target || id !== target.id || present.length === 1);
+  target = options.length ? TYPE[options[Math.floor(Math.random() * options.length)]] : null;
+}
+
+function landFish(f) {
+  const i = fishes.indexOf(f); if (i >= 0) fishes.splice(i, 1);
+  hook.fish = null; unlockHook();
+  splash(f.x, f.y, 26, 1.2); SFX.whoosh(); SFX.catch();
+  const wanted = !!(target && f.type.id === target.id);
+  if (f.type.junk) { time = Math.max(0, time - 5); SFX.boot(); }
+  else {
+    score += f.type.pts;
+    catches.push({ type: f.type, cm: f.cm });
+    if (wanted) { time += 10; SFX.bonus(); }
+  }
+  const p = proj(f.x, f.y);
+  catchShow = { f, t: 0, x0: p.x, y0: p.y, L0: FL(f) * p.s, a0: -Math.PI / 2, wanted };
+  spawnQ.push(rand(1.2, 2.6));
+  showHint = false;
+}
+
+function yank() {
+  if (state !== 'play' || paused || catchShow) return;
+  rodLift = 1;
+  const f = hook.fish;
+  if (f && f.state === 'bite') { landFish(f); return; }
+  SFX.whoosh();
+  if (f && f.state === 'nibble') { escape(f, 'Too early!'); return; }
+  if (f && f.state === 'approach') { escape(f, 'Spooked it!', 'spook'); }
+  if (hook.inWater) { addRipple(hook.x, hook.y, 30, 0.6); hook.still = 0; }
+}
+
+/* ================= game flow ================= */
+function populate(n) { fishes = []; for (let i = 0; i < n; i++) { const f = makeFish(pickType()); f.fade = 1; fishes.push(f); } }
+function startGame() {
+  state = 'play'; time = START_TIME; score = 0; catches = []; newBest = false; paused = false;
+  ripples = []; particles = []; popups = []; spawnQ = []; catchShow = null; lastTickSec = 99; startT = gameT; rodLift = 0;
+  hook.fish = null; unlockHook();
+  const w = unproj(mouse.x, mouse.y); hook.x = w.x; hook.y = w.y; hook.inWater = false;
+  populate(10); chooseTarget(); showHint = true;
+  cv.style.cursor = 'none';
+}
+function endGame() {
+  state = 'over'; overT = 0; time = 0;
+  if (hook.fish) { const f = hook.fish; hook.fish = null; toWander(f); }
+  unlockHook();
+  if (score > best) { best = score; newBest = true; saveBest(best); }
+  SFX.end();
+  cv.style.cursor = 'default';
+}
+
+/* ================= input ================= */
+const muteBtn = { x: 0, y: 0, r: 0 };
+function checkYank(now) {
+  const h = mouse.hist;
+  if (h.length < 2) return;
+  const a = h[0], b = h[h.length - 1], dt = (b.t - a.t) / 1000;
+  if (dt < 0.02) return;
+  const vy = (b.y - a.y) / dt;
+  if (vy < -H * 1.3 && now - lastYank > 450) { lastYank = now; h.length = 0; yank(); }
+}
+cv.addEventListener('pointermove', e => {
+  mouse.x = e.clientX; mouse.y = e.clientY;
+  const now = performance.now();
+  mouse.hist.push({ t: now, y: e.clientY });
+  while (mouse.hist.length && now - mouse.hist[0].t > 150) mouse.hist.shift();
+  if (state === 'play' && !paused) checkYank(now);
+});
+cv.addEventListener('pointerdown', e => {
+  audio();
+  mouse.x = e.clientX; mouse.y = e.clientY;
+  if (state === 'title') { startGame(); return; }
+  if (state === 'over') { if (overT > 1.0) startGame(); return; }
+  if (paused) { paused = false; cv.style.cursor = 'none'; return; }
+  if (dist(e.clientX, e.clientY, muteBtn.x, muteBtn.y) < muteBtn.r) { muted = !muted; return; }
+  yank();
+});
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); audio(); if (state === 'play' && !paused) yank(); else if (state === 'title' || (state === 'over' && overT > 1)) startGame(); }
+  else if (e.code === 'KeyM') muted = !muted;
+  else if ((e.code === 'KeyP' || e.code === 'Escape') && state === 'play') { paused = !paused; cv.style.cursor = paused ? 'default' : 'none'; }
+});
+window.addEventListener('blur', () => { if (state === 'play') { paused = true; cv.style.cursor = 'default'; } });
+window.addEventListener('resize', resize);
+
+/* ================= update ================= */
+function update(dt) {
+  gameT += dt;
+  if (paused) return;
+
+  // rod settles back down after a strike (held up while a fish is being landed)
+  if (catchShow && catchShow.t < 0.7) rodLift = 1;
+  else rodLift = Math.max(0, rodLift - dt * 2.4);
+
+  if (state === 'play') {
+    hook.px = hook.x; hook.py = hook.y;
+    const m = unproj(mouse.x, mouse.y);
+    if (!hook.lock) {
+      const k = 1 - Math.exp(-dt * 18);
+      hook.x = lerp(hook.x, m.x, k); hook.y = lerp(hook.y, m.y, k);
+    } else {
+      const biting = hook.fish && hook.fish.state === 'bite';
+      hook.x = hook.lx + (biting ? Math.sin(gameT * 32) * 1.5 : 0); hook.y = hook.ly;
+      if (dist(m.x, m.y, hook.lx, hook.ly) > 130) {
+        hook.drift += dt;
+        if (hook.drift > 0.3 && hook.fish) escape(hook.fish, hook.fish.state === 'nibble' ? 'Too jumpy!' : 'It got away…');
+      } else hook.drift = 0;
+    }
+    const sp = dist(hook.x, hook.y, hook.px, hook.py) / Math.max(dt, 1e-3);
+    hook.speed = lerp(hook.speed, sp, 0.3);
+    const was = hook.inWater;
+    hook.inWater = inPond(hook.x, hook.y, 10);
+    if (hook.inWater && !was) { addRipple(hook.x, hook.y, 36, 0.7); SFX.plop(); hook.still = 0; }
+    if (!hook.inWater && hook.fish && !hook.lock) { const f = hook.fish; hook.fish = null; toWander(f); }
+    if (hook.speed < 55) hook.still += dt; else hook.still = 0;
+    hook.dip = lerp(hook.dip, hook.dipTarget, 1 - Math.exp(-dt * 9));
+    if (hook.fish && hook.fish.state === 'approach' && hook.speed > 320) escape(hook.fish, 'Spooked it!', 'spook');
+
+    if (!catchShow && hook.inWater && !hook.lock && !hook.fish && hook.still > 0.35) {
+      const R = 230 + Math.min(hook.still, 6) * 35;
+      let bestF = null, bd = 1e9;
+      for (const f of fishes) {
+        if (f.state !== 'wander' || f.cool > 0 || f.fade < 1) continue;
+        const d = dist(f.x, f.y, hook.x, hook.y);
+        if (f.type.junk) {
+          if (d < 38 && hook.still > 0.8) { hook.fish = f; lockHook(); startBite(f, f.type.window); bestF = null; break; }
+          continue;
+        }
+        if (d < R && d < bd) { bd = d; bestF = f; }
+      }
+      if (bestF && !hook.fish && Math.random() < dt * (0.7 + hook.still * 0.18)) { bestF.state = 'approach'; bestF.hes = 0; hook.fish = bestF; }
+    }
+
+    if (!catchShow) {
+      time -= dt;
+      const s = Math.ceil(time);
+      if (s <= 10 && s !== lastTickSec && s > 0) { lastTickSec = s; SFX.tick(); }
+      if (time <= 0) endGame();
+    }
+
+    for (let i = spawnQ.length - 1; i >= 0; i--) {
+      spawnQ[i] -= dt;
+      if (spawnQ[i] <= 0) { spawnQ.splice(i, 1); fishes.push(makeFish(pickType())); }
+    }
+    if (!catchShow && (!target || !fishes.some(f => f.type === target))) chooseTarget();
+  }
+  if (state === 'over') overT += dt;
+
+  for (const f of fishes) updateFish(f, dt);
+
+  if (catchShow) {
+    catchShow.t += dt;
+    if (catchShow.t > 2.7) { const wasWanted = catchShow.wanted; catchShow = null; if (wasWanted) chooseTarget(); }
+  }
+
+  for (let i = ripples.length - 1; i >= 0; i--) { const r = ripples[i]; r.life += dt; if (r.life > r.dur) ripples.splice(i, 1); }
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i]; p.life += dt; p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.life > p.dur) particles.splice(i, 1);
+  }
+  for (let i = popups.length - 1; i >= 0; i--) { const p = popups[i]; p.t += dt; if (p.t > p.dur) popups.splice(i, 1); }
+}
+
+/* ================= render ================= */
+function renderWorld(t) {
+  const g = wctx;
+  g.setTransform(WS, 0, 0, WS, 0, 0);
+  g.drawImage(worldStatic, 0, 0, WW, WH);
+  g.save();
+  pondPath(g, 1); g.clip();
+  const gr = g.createRadialGradient(pond.cx, pond.cy, 40, pond.cx, pond.cy, Math.max(pond.rx, pond.ry) * 1.1);
+  gr.addColorStop(0, '#1d5d78'); gr.addColorStop(0.65, '#2d7f93'); gr.addColorStop(1, '#58aeae');
+  g.fillStyle = gr; g.fillRect(pond.cx - pond.rx * 1.2, pond.cy - pond.ry * 1.2, pond.rx * 2.4, pond.ry * 2.4);
+  g.globalAlpha = 0.18; g.fillStyle = '#0d3a4a';
+  for (let i = 0; i < 12; i++) {
+    const a = i * 2.39996, d = 0.25 + (i % 5) * 0.14;
+    g.beginPath(); g.ellipse(pond.cx + Math.cos(a) * pond.rx * d, pond.cy + Math.sin(a) * pond.ry * d, 50, 28, a, 0, TAU); g.fill();
+  }
+  g.globalAlpha = 1;
+  for (const f of fishes) drawFish(g, f.type, f.x + 8, f.y + 12, f.a, FL(f), gameT, f.phase, 'shadow', f.state === 'bite' ? 2.5 : f.state === 'flee' ? 2 : 1);
+  for (const f of fishes) {
+    g.globalAlpha = 0.84 * f.fade;
+    drawFish(g, f.type, f.x, f.y, f.a, FL(f), gameT * (f.state === 'flee' ? 2 : 1), f.phase, 'water', f.state === 'bite' ? 2.5 : 1);
+  }
+  g.globalAlpha = 1;
+  g.fillStyle = 'rgba(40,120,140,0.16)'; g.fillRect(0, 0, WW, WH);
+  g.strokeStyle = 'rgba(255,255,255,0.08)'; g.lineWidth = 2.5;
+  const top = pond.cy - pond.ry * 1.15, rows = 22;
+  for (let i = 0; i < rows; i++) {
+    const y0 = top + (i + 0.5) / rows * pond.ry * 2.3;
+    g.beginPath();
+    for (let x = pond.cx - pond.rx * 1.15, j = 0; x <= pond.cx + pond.rx * 1.15; x += 20, j++) {
+      const y = y0 + Math.sin(x * 0.012 + t * 0.8 + i * 1.7) * 8 + Math.sin(x * 0.033 - t * 1.2 + i) * 3.5;
+      j ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.stroke();
+  }
+  for (const l of lilies) drawLily(g, l, t);
+  for (const r of ripples) {
+    const p = r.life / r.dur, rad = r.r + (r.max - r.r) * (1 - Math.pow(1 - p, 2));
+    g.strokeStyle = `rgba(255,255,255,${r.a * (1 - p)})`; g.lineWidth = 3;
+    g.beginPath(); g.arc(r.x, r.y, rad, 0, TAU); g.stroke();
+  }
+  // rings around the float (drawn on the water so they get perspective)
+  if (state === 'play' && hook.inWater) {
+    const biting = hook.fish && hook.fish.state === 'bite';
+    if (biting) {
+      for (let k = 0; k < 2; k++) {
+        const p = ((gameT * 2.2) + k * 0.5) % 1;
+        g.strokeStyle = `rgba(255,255,255,${0.75 * (1 - p)})`; g.lineWidth = 3.5;
+        g.beginPath(); g.arc(hook.x, hook.y, 12 + p * 50, 0, TAU); g.stroke();
+      }
+    } else {
+      g.strokeStyle = `rgba(255,255,255,${0.35 * (1 - hook.dip)})`; g.lineWidth = 2;
+      g.beginPath(); g.arc(hook.x, hook.y, 17 + Math.sin(gameT * 2.5) * 2, 0, TAU); g.stroke();
+    }
+  }
+  g.restore();
+  g.strokeStyle = 'rgba(255,255,255,.25)'; g.lineWidth = 4;
+  pondPath(g, 1 + Math.sin(t * 1.2) * 0.004); g.stroke();
+}
+
+function projectWorld() {
+  const top = Math.max(0, Math.floor(cam.farY));
+  for (let sy = top; sy < H; sy += STRIP) {
+    const z0 = cam.A / (sy - cam.hy), z1 = cam.A / (sy + STRIP - cam.hy);
+    const y0 = cam.yc - z0;
+    let y1 = cam.yc - z1;
+    if (y0 >= WH) break;
+    if (y1 > WH) y1 = WH;
+    const zm = (z0 + z1) / 2, w = WW * cam.B / zm;
+    ctx.drawImage(world, 0, y0 * WS, world.width, Math.max(1, (y1 - y0) * WS), W / 2 - w / 2, sy, w, STRIP + 0.7);
+  }
+  // atmospheric haze toward the far bank
+  const hz = ctx.createLinearGradient(0, cam.farY - 4, 0, cam.farY + H * 0.16);
+  hz.addColorStop(0, 'rgba(225,242,248,.55)'); hz.addColorStop(1, 'rgba(225,242,248,0)');
+  ctx.fillStyle = hz; ctx.fillRect(0, cam.farY - 4, W, H * 0.16 + 4);
+}
+
+function rodTip() {
+  const b = proj(hook.x, hook.y);
+  const biting = hook.fish && hook.fish.state === 'bite';
+  const e = rodLift * rodLift * (3 - 2 * rodLift);
+  return {
+    x: W * 0.5 + (b.x - W * 0.5) * 0.3 + (biting ? Math.sin(gameT * 30) * 3 * SU : 0),
+    y: H * 0.74 + (biting ? 18 * SU : 0) - e * H * 0.3,
+  };
+}
+function drawLineAndBobber() {
+  const tip = rodTip();
+  const p = proj(hook.x, hook.y);
+  const r = 13 * p.s;
+  const bx = p.x, by = hook.inWater ? p.y : p.y - 26 * p.s;
+  const tight = (hook.fish && hook.fish.state === 'bite') || rodLift > 0.3;
+  const sag = tight ? 0 : (hook.lock ? 10 : 30) * SU;
+  ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 1.4 * SU;
+  ctx.beginPath(); ctx.moveTo(tip.x, tip.y);
+  ctx.quadraticCurveTo((tip.x + bx) / 2, (tip.y + by) / 2 + sag, bx, by - r * 1.6); ctx.stroke();
+
+  if (!hook.inWater) {
+    ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.ellipse(p.x, p.y, r, r * 0.4, 0, 0, TAU); ctx.fill();
+    drawFloat(bx, by, r, 0); return;
+  }
+  drawFloat(bx, by, r, hook.dip);
+  if (hook.fish && hook.fish.state === 'bite') {
+    const bob = Math.abs(Math.sin(gameT * 9)) * 6 * SU;
+    const qx = bx + 26 * SU, qy = by - 54 * SU - bob;
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(qx, qy, 19 * SU, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(qx - 9 * SU, qy + 13 * SU); ctx.lineTo(qx - 16 * SU, qy + 27 * SU); ctx.lineTo(qx + 2 * SU, qy + 17 * SU); ctx.fill();
+    txt('!', qx, qy + 1 * SU, 32 * SU, '#e8412f', 'center', 800);
+  }
+}
+// a classic upright float, seen from the side; `sub` = how far it is pulled under
+function drawFloat(x, y, r, sub) {
+  const sink = sub * r * 2.1;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x - r * 3, y - r * 6, r * 6, r * 6); ctx.clip(); // hide the part under water
+  const cy = y - r * 0.55 + sink;
+  ctx.fillStyle = '#f7f4ec'; ctx.beginPath(); ctx.ellipse(x, cy + r * 0.35, r * 0.85, r * 0.75, 0, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#e8412f'; ctx.beginPath(); ctx.ellipse(x, cy - r * 0.15, r * 0.85, r * 0.75, 0, Math.PI, TAU); ctx.lineTo(x + r * 0.85, cy + r * 0.2); ctx.lineTo(x - r * 0.85, cy + r * 0.2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.beginPath(); ctx.ellipse(x - r * 0.35, cy - r * 0.4, r * 0.18, r * 0.25, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#333'; ctx.lineWidth = Math.max(1, r * 0.16);
+  ctx.beginPath(); ctx.moveTo(x, cy - r * 0.85); ctx.lineTo(x, cy - r * 1.7); ctx.stroke();
+  ctx.restore();
+  if (sub < 0.95) {
+    ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = Math.max(1, r * 0.12);
+    ctx.beginPath(); ctx.ellipse(x, y, r * 1.1, r * 0.3, 0, 0, TAU); ctx.stroke();
+  }
+}
+function drawRod() {
+  const tip = rodTip();
+  const bx = W * 0.56, by = H + 50 * SU;
+  // slight bend: control point pulled toward the line
+  const cx = lerp(bx, tip.x, 0.55) + (tip.x - bx) * 0.08, cyy = lerp(by, tip.y, 0.55) + 14 * SU * (1 - rodLift);
+  const n = 18;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < n; i++) {
+    const t0 = i / n, t1 = (i + 1) / n;
+    const q = t => ({ x: (1 - t) * (1 - t) * bx + 2 * (1 - t) * t * cx + t * t * tip.x, y: (1 - t) * (1 - t) * by + 2 * (1 - t) * t * cyy + t * t * tip.y });
+    const a = q(t0), b = q(t1);
+    ctx.strokeStyle = i < 5 ? '#c99a63' : '#3b2a1c';
+    ctx.lineWidth = lerp(16, 3, t0) * SU;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  const rx = lerp(bx, cx, 0.4), ry = lerp(by, cyy, 0.4);
+  ctx.fillStyle = '#9aa3ab'; ctx.beginPath(); ctx.arc(rx + 12 * SU, ry, 15 * SU, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#5c646b'; ctx.beginPath(); ctx.arc(rx + 12 * SU, ry, 7 * SU, 0, TAU); ctx.fill();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.fillStyle = `rgba(220,245,255,${1 - p.life / p.dur})`;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.fill();
+  }
+  for (const p of popups) {
+    const k = p.t / p.dur, a = k < 0.75 ? 1 : 1 - (k - 0.75) / 0.25;
+    ctx.globalAlpha = a;
+    txt(p.text, p.x, p.y - 50 * SU - k * 36 * SU, p.size * SU, p.color, 'center', 800, 'rgba(10,40,55,.85)');
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawCatchShow() {
+  const cs = catchShow; if (!cs) return;
+  const f = cs.f, t = cs.t, cx = W / 2, cy = H * 0.47;
+  const fade = t > 2.4 ? clamp(1 - (t - 2.4) / 0.3, 0, 1) : 1;
+  ctx.save(); ctx.globalAlpha = fade;
+  const cw = 400 * HS, ch = 270 * HS;
+  const ARC = 0.75;
+  if (t > ARC - 0.1) {
+    const p = clamp((t - ARC + 0.1) / 0.28, 0, 1), e = easeOutBack(p);
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(e, e);
+    if (cs.wanted) {
+      ctx.save(); ctx.rotate(gameT * 0.6); ctx.fillStyle = 'rgba(255,220,90,.35)';
+      for (let k = 0; k < 12; k++) { ctx.rotate(TAU / 12); ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-30 * HS, -260 * HS); ctx.lineTo(30 * HS, -260 * HS); ctx.fill(); }
+      ctx.restore();
+    }
+    panel(-cw / 2, -ch / 2, cw, ch, 26 * HS, f.type.junk ? '#efe3d2' : '#fffaf0', f.type.junk ? '#8a6a46' : (cs.wanted ? '#f0b323' : '#2d7f93'));
+    if (f.type.junk) {
+      txt('Old Boot…', 0, 40 * HS, 40 * HS, '#6b4a2b');
+      txt('−5 seconds', 0, 88 * HS, 30 * HS, '#c0392b');
+    } else {
+      txt(f.type.name, 0, 30 * HS, 40 * HS, '#173f4f');
+      txt(`${f.cm} cm`, 0, 64 * HS, 24 * HS, '#4a7d8c', 'center', 700);
+      txt(`+${f.type.pts}`, 0, 104 * HS, 40 * HS, '#e8412f');
+    }
+    if (cs.wanted) {
+      ctx.fillStyle = '#f0b323'; ctx.beginPath(); rr(ctx, -150 * HS, -ch / 2 - 22 * HS, 300 * HS, 44 * HS, 22 * HS); ctx.fill();
+      txt('WANTED!  +10 sec', 0, -ch / 2, 26 * HS, '#4a2f00');
+    }
+    ctx.restore();
+  }
+  // the fish is hauled out of the water and swings up toward you on the line
+  const p = clamp(t / ARC, 0, 1), e = 1 - Math.pow(1 - p, 2.2);
+  const bigL = Math.min(f.type.size * f.sc * 1.7 * HS, 280 * HS);
+  const fx = lerp(cs.x0, cx, e) + Math.sin(p * Math.PI) * 30 * HS;
+  const fy = lerp(cs.y0, cy - 52 * HS, e) - Math.sin(Math.PI * p) * H * 0.28;
+  const L = lerp(cs.L0, bigL, e);
+  // hang head-up from the line, then settle sideways on the card
+  const dangle = -Math.PI / 2 + Math.sin(t * 22) * 0.45;
+  const a = p < 1 ? dangle : lerp(dangle, -0.18, clamp((t - ARC) / 0.2, 0, 1)) + Math.sin(t * 12) * 0.08;
+  if (p < 1) {
+    const tip = rodTip();
+    const hx = fx + Math.cos(a) * L / 2, hy = fy + Math.sin(a) * L / 2;
+    ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 1.4 * SU;
+    ctx.beginPath(); ctx.moveTo(tip.x, tip.y); ctx.lineTo(hx, hy); ctx.stroke();
+    if (p < 0.5) for (let k = 0; k < 3; k++) {
+      ctx.fillStyle = 'rgba(220,245,255,.8)';
+      ctx.beginPath(); ctx.arc(fx + Math.sin(t * 40 + k * 2) * L * 0.3, fy + L * 0.4 + k * 10 * SU, 3 * SU, 0, TAU); ctx.fill();
+    }
+  }
+  drawFish(ctx, f.type, fx, fy, a, L, t * 1.6, f.phase, 'air', 2.2);
+  ctx.restore();
+}
+
+function drawHUD() {
+  const s = HS, m = 16 * s;
+  panel(m, m, 190 * s, 64 * s, 18 * s, 'rgba(255,250,240,.94)', '#2d7f93');
+  txt('SCORE', m + 18 * s, m + 20 * s, 15 * s, '#4a7d8c', 'left', 700);
+  txt(String(score), m + 18 * s, m + 43 * s, 30 * s, '#173f4f', 'left');
+  const tsec = Math.max(0, Math.ceil(time));
+  const low = tsec <= 10 && state === 'play';
+  const pulse = low ? 1 + Math.max(0, Math.sin(gameT * TAU)) * 0.08 : 1;
+  ctx.save(); ctx.translate(W / 2, m + 32 * s); ctx.scale(pulse, pulse);
+  panel(-75 * s, -32 * s, 150 * s, 64 * s, 32 * s, low ? '#ffe6e1' : 'rgba(255,250,240,.94)', low ? '#e8412f' : '#2d7f93');
+  const mm = Math.floor(tsec / 60), ss = String(tsec % 60).padStart(2, '0');
+  txt(`${mm}:${ss}`, 0, 2 * s, 36 * s, low ? '#e8412f' : '#173f4f');
+  ctx.restore();
+  if (target) {
+    const w = 230 * s, h = 92 * s, x = W - m - w, y = m;
+    panel(x, y, w, h, 18 * s, '#fff6d6', '#f0b323');
+    txt('★ WANTED', x + 16 * s, y + 20 * s, 16 * s, '#a87400', 'left', 800);
+    txt('+10 sec', x + w - 16 * s, y + 20 * s, 15 * s, '#2f8a3a', 'right', 800);
+    drawFish(ctx, target, x + 58 * s, y + 58 * s, 0, Math.min(target.size * 0.85, 96) * s, gameT, 0, 'air', 1);
+    txt(target.name, x + w - 16 * s, y + 58 * s, 20 * s, '#173f4f', 'right');
+  }
+  muteBtn.r = 20 * s; muteBtn.x = W - m - muteBtn.r; muteBtn.y = H - m - muteBtn.r;
+  ctx.fillStyle = 'rgba(255,250,240,.85)'; ctx.beginPath(); ctx.arc(muteBtn.x, muteBtn.y, muteBtn.r, 0, TAU); ctx.fill();
+  drawSpeaker(muteBtn.x, muteBtn.y, s, muted);
+  if (showHint && state === 'play') {
+    const a = clamp((gameT - startT) < 12 ? 1 : 1 - ((gameT - startT) - 12) / 2, 0, 1);
+    if (a > 0) {
+      ctx.globalAlpha = a;
+      const msg = 'Hold the float still · When it plunges, flick the mouse UP (or click)';
+      ctx.font = `700 ${17 * s}px ${FONT}`;
+      const w = ctx.measureText(msg).width + 40 * s;
+      panel(W / 2 - w / 2, m + 76 * s, w, 42 * s, 21 * s, 'rgba(10,40,55,.78)', null, false);
+      txt(msg, W / 2, m + 97 * s, 17 * s, '#fff', 'center', 700);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+function drawSpeaker(x, y, s, off) {
+  ctx.fillStyle = '#173f4f';
+  ctx.beginPath(); ctx.moveTo(x - 9 * s, y - 4 * s); ctx.lineTo(x - 4 * s, y - 4 * s); ctx.lineTo(x + 2 * s, y - 9 * s); ctx.lineTo(x + 2 * s, y + 9 * s); ctx.lineTo(x - 4 * s, y + 4 * s); ctx.lineTo(x - 9 * s, y + 4 * s); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = off ? '#e8412f' : '#173f4f'; ctx.lineWidth = 2 * s; ctx.lineCap = 'round';
+  if (off) { ctx.beginPath(); ctx.moveTo(x + 5 * s, y - 5 * s); ctx.lineTo(x + 12 * s, y + 5 * s); ctx.moveTo(x + 12 * s, y - 5 * s); ctx.lineTo(x + 5 * s, y + 5 * s); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.arc(x + 3 * s, y, 6 * s, -0.8, 0.8); ctx.stroke(); ctx.beginPath(); ctx.arc(x + 3 * s, y, 10 * s, -0.8, 0.8); ctx.stroke(); }
+}
+
+function dim(a = 0.35) { ctx.fillStyle = `rgba(8,30,40,${a})`; ctx.fillRect(0, 0, W, H); }
+
+function drawTitle() {
+  dim(0.3);
+  const s = HS, w = 600 * s, h = 470 * s, x = W / 2 - w / 2, y = H / 2 - h / 2;
+  panel(x, y, w, h, 32 * s, 'rgba(255,250,240,.96)', '#2d7f93');
+  drawFish(ctx, TYPE.koi, x + 52 * s, y + 70 * s, -0.25, 74 * s, gameT, 0, 'air');
+  drawFish(ctx, TYPE.bass, x + w - 52 * s, y + 70 * s, Math.PI + 0.25, 74 * s, gameT, 2, 'air');
+  txt('Lilypad Lake', W / 2, y + 70 * s, 62 * s, '#173f4f', 'center', 800);
+  txt('a pond fishing game', W / 2, y + 116 * s, 22 * s, '#4a7d8c', 'center', 700);
+  const lines = [
+    ['1', 'Move the mouse to drop your float in the pond.'],
+    ['2', 'Hold still. A fish creeps up and nibbles.'],
+    ['3', 'When the float plunges, flick the mouse UP or click!'],
+    ['★', 'Catch the WANTED fish for +10 seconds.'],
+  ];
+  lines.forEach(([n, l], i) => {
+    const ly = y + 170 * s + i * 50 * s;
+    ctx.fillStyle = n === '★' ? '#f0b323' : '#2d7f93';
+    ctx.beginPath(); ctx.arc(x + 62 * s, ly, 17 * s, 0, TAU); ctx.fill();
+    txt(n, x + 62 * s, ly + 1 * s, 19 * s, '#fff');
+    txt(l, x + 92 * s, ly + 1 * s, 20 * s, '#173f4f', 'left', 700);
+  });
+  const pulse = 1 + Math.sin(gameT * 4) * 0.04;
+  ctx.save(); ctx.translate(W / 2, y + h - 58 * s); ctx.scale(pulse, pulse);
+  panel(-140 * s, -28 * s, 280 * s, 56 * s, 28 * s, '#e8412f', null);
+  txt('Click to start', 0, 1 * s, 26 * s, '#fff');
+  ctx.restore();
+  if (best > 0) txt(`Best: ${best}`, x + w - 24 * s, y + h - 22 * s, 16 * s, '#4a7d8c', 'right', 700);
+  txt('M: sound   P: pause', x + 24 * s, y + h - 22 * s, 16 * s, '#4a7d8c', 'left', 700);
+}
+
+function drawOver() {
+  dim(0.4 * Math.min(1, overT * 2));
+  const s = HS, w = 560 * s, h = 470 * s, x = W / 2 - w / 2;
+  const e = easeOutBack(clamp(overT / 0.45, 0, 1));
+  const y = H / 2 - h / 2 + (1 - e) * 60 * s;
+  ctx.save(); ctx.globalAlpha = clamp(overT * 3, 0, 1);
+  panel(x, y, w, h, 32 * s, 'rgba(255,250,240,.97)', '#2d7f93');
+  txt("Time's Up!", W / 2, y + 58 * s, 50 * s, '#173f4f');
+  txt(String(score), W / 2, y + 132 * s, 78 * s, '#e8412f');
+  txt('points', W / 2, y + 180 * s, 20 * s, '#4a7d8c', 'center', 700);
+  if (newBest) {
+    const b = 1 + Math.sin(gameT * 6) * 0.05;
+    ctx.save(); ctx.translate(W / 2 + 150 * s, y + 118 * s); ctx.rotate(0.18); ctx.scale(b, b);
+    panel(-70 * s, -20 * s, 140 * s, 40 * s, 20 * s, '#f0b323', null);
+    txt('NEW BEST!', 0, 1 * s, 20 * s, '#4a2f00');
+    ctx.restore();
+  } else txt(`Best: ${best}`, W / 2, y + 206 * s, 18 * s, '#4a7d8c', 'center', 700);
+  const groups = {};
+  for (const c of catches) groups[c.type.id] = (groups[c.type.id] || 0) + 1;
+  const ids = TYPES.filter(t => groups[t.id]).map(t => t.id);
+  if (!ids.length) txt('No fish this time. Hold still and be patient!', W / 2, y + 280 * s, 19 * s, '#4a7d8c', 'center', 700);
+  else {
+    const cw = 120 * s;
+    ids.forEach((id, i) => {
+      const row = Math.floor(i / 4), col = i % 4, inRow = Math.min(4, ids.length - row * 4);
+      const cx = W / 2 - (inRow - 1) * cw / 2 + col * cw, cy = y + 258 * s + row * 62 * s;
+      drawFish(ctx, TYPE[id], cx - 16 * s, cy, 0, Math.min(TYPE[id].size, 90) * 0.62 * s, gameT, i, 'air');
+      txt(`×${groups[id]}`, cx + 34 * s, cy + 2 * s, 20 * s, '#173f4f', 'left');
+    });
+    const big = catches.reduce((a, c) => (!a || c.cm > a.cm ? c : a), null);
+    if (big) txt(`Biggest: ${big.type.name}, ${big.cm} cm`, W / 2, y + 370 * s, 18 * s, '#4a7d8c', 'center', 700);
+  }
+  if (overT > 1.0) {
+    const pulse = 1 + Math.sin(gameT * 4) * 0.04;
+    ctx.save(); ctx.translate(W / 2, y + h - 44 * s); ctx.scale(pulse, pulse);
+    panel(-140 * s, -26 * s, 280 * s, 52 * s, 26 * s, '#e8412f', null);
+    txt('Fish again', 0, 1 * s, 24 * s, '#fff');
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function render() {
+  renderWorld(gameT);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.drawImage(skyCanvas, 0, 0, W, H);
+  projectWorld();
+  for (const l of lilies) drawLilyFlower(l);
+  for (const r of reedSpots) drawReedCluster(r);
+  if (state === 'play') drawLineAndBobber();
+  ctx.drawImage(fgCanvas, 0, 0, W, H);
+  if (state === 'play') drawRod();
+  drawParticles();
+  drawCatchShow();
+  if (state !== 'title') drawHUD();
+  if (state === 'title') drawTitle();
+  if (state === 'over') drawOver();
+  if (paused && state === 'play') {
+    dim(0.45);
+    txt('Paused', W / 2, H / 2 - 20 * HS, 60 * HS, '#fff');
+    txt('Click or press P to keep fishing', W / 2, H / 2 + 34 * HS, 22 * HS, '#e0f2f5', 'center', 700);
+  }
+}
+
+/* ================= loop ================= */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); render();
+  requestAnimationFrame(frame);
+}
+buildWorldStatic();
+resize();
+mouse.x = W / 2; mouse.y = H * 0.6;
+populate(10);
+cv.style.cursor = 'default';
+requestAnimationFrame(frame);
+window.__game = { get state() { return state; }, get fishes() { return fishes; }, get score() { return score; }, get catchShow() { return catchShow; }, hook, startGame, step: dt => update(dt), draw: () => render() };
+})();
+</script>
+</body>
+</html>
