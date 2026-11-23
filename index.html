@@ -103,13 +103,13 @@ function pondPath(c, scale = 1) {
 /* ================= fish types ================= */
 // window = seconds you have to strike after the bobber plunges
 const TYPES = [
-  { id: 'minnow', name: 'Minnow',     pts: 10,  size: 44,  speed: 95,  color: '#9fb4bf', side: '#d5e2e8', w: 0.20, weight: 5,   window: 0.59, nib: [2, 3], cm: [5, 9] },
-  { id: 'sunny',  name: 'Sunfish',    pts: 20,  size: 58,  speed: 72,  color: '#c8912f', side: '#efcf7e', w: 0.34, weight: 4,   window: 0.56,  nib: [2, 4], cm: [10, 18] },
-  { id: 'perch',  name: 'Perch',      pts: 30,  size: 70,  speed: 78,  color: '#7f9d3e', side: '#d8d996', w: 0.25, weight: 4,   window: 0.52, nib: [3, 4], cm: [15, 28], stripes: true },
-  { id: 'bass',   name: 'Bass',       pts: 50,  size: 92,  speed: 72,  color: '#4f6f3e', side: '#a9bb83', w: 0.27, weight: 3,   window: 0.48, nib: [3, 4], cm: [25, 45] },
-  { id: 'carp',   name: 'Carp',       pts: 70,  size: 112, speed: 52,  color: '#7d5d33', side: '#c9ad78', w: 0.30, weight: 2,   window: 0.43, nib: [3, 5], cm: [40, 70], scales: true },
-  { id: 'pike',   name: 'Pike',       pts: 100, size: 140, speed: 100, color: '#435e47', side: '#a6b98a', w: 0.16, weight: 1.2, window: 0.35,  nib: [3, 5], cm: [60, 100], spots: true },
-  { id: 'koi',    name: 'Golden Koi', pts: 150, size: 84,  speed: 85,  color: '#f08a24', side: '#ffc36b', w: 0.25, weight: 0.6, window: 0.33, nib: [4, 6], cm: [30, 50], koi: true },
+  { id: 'minnow', name: 'Minnow',     pts: 10,  size: 44,  speed: 95,  color: '#9fb4bf', side: '#d5e2e8', w: 0.20, weight: 5,   window: 0.47, nib: [2, 3], cm: [5, 9] },
+  { id: 'sunny',  name: 'Sunfish',    pts: 20,  size: 58,  speed: 72,  color: '#c8912f', side: '#efcf7e', w: 0.34, weight: 4,   window: 0.45,  nib: [2, 4], cm: [10, 18] },
+  { id: 'perch',  name: 'Perch',      pts: 30,  size: 70,  speed: 78,  color: '#7f9d3e', side: '#d8d996', w: 0.25, weight: 4,   window: 0.42, nib: [3, 4], cm: [15, 28], stripes: true },
+  { id: 'bass',   name: 'Bass',       pts: 50,  size: 92,  speed: 72,  color: '#4f6f3e', side: '#a9bb83', w: 0.27, weight: 3,   window: 0.38, nib: [3, 4], cm: [25, 45] },
+  { id: 'carp',   name: 'Carp',       pts: 70,  size: 112, speed: 52,  color: '#7d5d33', side: '#c9ad78', w: 0.30, weight: 2,   window: 0.34, nib: [3, 5], cm: [40, 70], scales: true },
+  { id: 'pike',   name: 'Pike',       pts: 100, size: 140, speed: 100, color: '#435e47', side: '#a6b98a', w: 0.16, weight: 1.2, window: 0.28,  nib: [3, 5], cm: [60, 100], spots: true },
+  { id: 'koi',    name: 'Golden Koi', pts: 150, size: 84,  speed: 85,  color: '#f08a24', side: '#ffc36b', w: 0.25, weight: 0.6, window: 0.26, nib: [4, 6], cm: [30, 50], koi: true },
   { id: 'boot',   name: 'Old Boot',   pts: 0,   size: 64,  speed: 12,  junk: true, weight: 0.8, window: 1.4, nib: [0, 0], cm: [0, 0] },
 ];
 const TYPE = Object.fromEntries(TYPES.map(t => [t.id, t]));
