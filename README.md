@@ -7,7 +7,7 @@ A relaxing pond fishing game for the desktop browser. **Play it:** https://headc
 1. Move the mouse to drop your float in the pond.
 2. Hold still. A fish creeps up and nibbles.
 3. When the float plunges, flick the mouse **up** (or click) to hook it.
-4. Catch the **Wanted** fish for +10 seconds. Watch out for the old boot (−5 seconds).
+4. Catch the **Wanted** fish for +8 seconds. Watch out for the old boot (−8 seconds).
 
 You have 60 seconds. Your best score is saved in your browser.
 

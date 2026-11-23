@@ -103,13 +103,13 @@ function pondPath(c, scale = 1) {
 /* ================= fish types ================= */
 // window = seconds you have to strike after the bobber plunges
 const TYPES = [
-  { id: 'minnow', name: 'Minnow',     pts: 10,  size: 44,  speed: 95,  color: '#9fb4bf', side: '#d5e2e8', w: 0.20, weight: 5,   window: 0.85, nib: [1, 2], cm: [5, 9] },
-  { id: 'sunny',  name: 'Sunfish',    pts: 20,  size: 58,  speed: 72,  color: '#c8912f', side: '#efcf7e', w: 0.34, weight: 4,   window: 0.8,  nib: [1, 3], cm: [10, 18] },
-  { id: 'perch',  name: 'Perch',      pts: 30,  size: 70,  speed: 78,  color: '#7f9d3e', side: '#d8d996', w: 0.25, weight: 4,   window: 0.75, nib: [2, 3], cm: [15, 28], stripes: true },
-  { id: 'bass',   name: 'Bass',       pts: 50,  size: 92,  speed: 72,  color: '#4f6f3e', side: '#a9bb83', w: 0.27, weight: 3,   window: 0.68, nib: [2, 3], cm: [25, 45] },
-  { id: 'carp',   name: 'Carp',       pts: 70,  size: 112, speed: 52,  color: '#7d5d33', side: '#c9ad78', w: 0.30, weight: 2,   window: 0.62, nib: [2, 4], cm: [40, 70], scales: true },
-  { id: 'pike',   name: 'Pike',       pts: 100, size: 140, speed: 100, color: '#435e47', side: '#a6b98a', w: 0.16, weight: 1.2, window: 0.5,  nib: [2, 4], cm: [60, 100], spots: true },
-  { id: 'koi',    name: 'Golden Koi', pts: 150, size: 84,  speed: 85,  color: '#f08a24', side: '#ffc36b', w: 0.25, weight: 0.6, window: 0.42, nib: [3, 5], cm: [30, 50], koi: true },
+  { id: 'minnow', name: 'Minnow',     pts: 10,  size: 44,  speed: 95,  color: '#9fb4bf', side: '#d5e2e8', w: 0.20, weight: 5,   window: 0.59, nib: [2, 3], cm: [5, 9] },
+  { id: 'sunny',  name: 'Sunfish',    pts: 20,  size: 58,  speed: 72,  color: '#c8912f', side: '#efcf7e', w: 0.34, weight: 4,   window: 0.56,  nib: [2, 4], cm: [10, 18] },
+  { id: 'perch',  name: 'Perch',      pts: 30,  size: 70,  speed: 78,  color: '#7f9d3e', side: '#d8d996', w: 0.25, weight: 4,   window: 0.52, nib: [3, 4], cm: [15, 28], stripes: true },
+  { id: 'bass',   name: 'Bass',       pts: 50,  size: 92,  speed: 72,  color: '#4f6f3e', side: '#a9bb83', w: 0.27, weight: 3,   window: 0.48, nib: [3, 4], cm: [25, 45] },
+  { id: 'carp',   name: 'Carp',       pts: 70,  size: 112, speed: 52,  color: '#7d5d33', side: '#c9ad78', w: 0.30, weight: 2,   window: 0.43, nib: [3, 5], cm: [40, 70], scales: true },
+  { id: 'pike',   name: 'Pike',       pts: 100, size: 140, speed: 100, color: '#435e47', side: '#a6b98a', w: 0.16, weight: 1.2, window: 0.35,  nib: [3, 5], cm: [60, 100], spots: true },
+  { id: 'koi',    name: 'Golden Koi', pts: 150, size: 84,  speed: 85,  color: '#f08a24', side: '#ffc36b', w: 0.25, weight: 0.6, window: 0.33, nib: [4, 6], cm: [30, 50], koi: true },
   { id: 'boot',   name: 'Old Boot',   pts: 0,   size: 64,  speed: 12,  junk: true, weight: 0.8, window: 1.4, nib: [0, 0], cm: [0, 0] },
 ];
 const TYPE = Object.fromEntries(TYPES.map(t => [t.id, t]));
@@ -591,11 +591,11 @@ function landFish(f) {
   reelIn();
   splash(f.x, f.y, 26, 1.2); SFX.whoosh(); SFX.catch();
   const wanted = !!(target && f.type.id === target.id);
-  if (f.type.junk) { time = Math.max(0, time - 5); SFX.boot(); }
+  if (f.type.junk) { time = Math.max(0, time - 8); SFX.boot(); }
   else {
     score += f.type.pts;
     catches.push({ type: f.type, cm: f.cm });
-    if (wanted) { time += 10; SFX.bonus(); }
+    if (wanted) { time += 8; SFX.bonus(); }
   }
   const p = proj(f.x, f.y);
   catchShow = { f, t: 0, x0: p.x, y0: p.y, L0: FL(f) * p.s, a0: -Math.PI / 2, wanted };
@@ -705,7 +705,7 @@ function update(dt) {
     hook.dip = lerp(hook.dip, hook.dipTarget, 1 - Math.exp(-dt * 9));
 
     if (!catchShow && hook.inWater && !hook.lock && !hook.fish && hook.still > 0.35) {
-      const R = 230 + Math.min(hook.still, 6) * 35;
+      const R = 180 + Math.min(hook.still, 6) * 30;
       let bestF = null, bd = 1e9;
       for (const f of fishes) {
         if (f.state !== 'wander' || f.cool > 0 || f.fade < 1) continue;
@@ -716,7 +716,7 @@ function update(dt) {
         }
         if (d < R && d < bd) { bd = d; bestF = f; }
       }
-      if (bestF && !hook.fish && Math.random() < dt * (0.7 + hook.still * 0.18)) { bestF.state = 'approach'; bestF.hes = 0; hook.fish = bestF; }
+      if (bestF && !hook.fish && Math.random() < dt * (0.45 + hook.still * 0.12)) { bestF.state = 'approach'; bestF.hes = 0; hook.fish = bestF; }
     }
 
     if (!catchShow) {
@@ -944,7 +944,7 @@ function drawCatchShow() {
     panel(-cw / 2, -ch / 2, cw, ch, 26 * HS, f.type.junk ? '#efe3d2' : '#fffaf0', f.type.junk ? '#8a6a46' : (cs.wanted ? '#f0b323' : '#2d7f93'));
     if (f.type.junk) {
       txt('Old Boot…', 0, 40 * HS, 40 * HS, '#6b4a2b');
-      txt('−5 seconds', 0, 88 * HS, 30 * HS, '#c0392b');
+      txt('−8 seconds', 0, 88 * HS, 30 * HS, '#c0392b');
     } else {
       txt(f.type.name, 0, 30 * HS, 40 * HS, '#173f4f');
       txt(`${f.cm} cm`, 0, 64 * HS, 24 * HS, '#4a7d8c', 'center', 700);
@@ -952,7 +952,7 @@ function drawCatchShow() {
     }
     if (cs.wanted) {
       ctx.fillStyle = '#f0b323'; ctx.beginPath(); rr(ctx, -150 * HS, -ch / 2 - 22 * HS, 300 * HS, 44 * HS, 22 * HS); ctx.fill();
-      txt('WANTED!  +10 sec', 0, -ch / 2, 26 * HS, '#4a2f00');
+      txt('WANTED!  +8 sec', 0, -ch / 2, 26 * HS, '#4a2f00');
     }
     ctx.restore();
   }
@@ -996,7 +996,7 @@ function drawHUD() {
     const w = 230 * s, h = 92 * s, x = W - m - w, y = m;
     panel(x, y, w, h, 18 * s, '#fff6d6', '#f0b323');
     txt('★ WANTED', x + 16 * s, y + 20 * s, 16 * s, '#a87400', 'left', 800);
-    txt('+10 sec', x + w - 16 * s, y + 20 * s, 15 * s, '#2f8a3a', 'right', 800);
+    txt('+8 sec', x + w - 16 * s, y + 20 * s, 15 * s, '#2f8a3a', 'right', 800);
     drawFish(ctx, target, x + 58 * s, y + 58 * s, 0, Math.min(target.size * 0.85, 96) * s, gameT, 0, 'air', 1);
     txt(target.name, x + w - 16 * s, y + 58 * s, 20 * s, '#173f4f', 'right');
   }
@@ -1038,7 +1038,7 @@ function drawTitle() {
     ['1', 'Aim with the mouse, then click to cast.'],
     ['2', 'Your float stays put. Wait for a nibble…'],
     ['3', 'When the float plunges, flick the mouse UP or click!'],
-    ['★', 'Catch the WANTED fish for +10 seconds.'],
+    ['★', 'Catch the WANTED fish for +8 seconds.'],
   ];
   lines.forEach(([n, l], i) => {
     const ly = y + 170 * s + i * 50 * s;
